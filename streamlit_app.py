@@ -616,7 +616,7 @@ def main():
         col1, col2 = st.columns([1, 4])
         with col1:
             batch_submit = st.button(
-                "🚀 Generate & Test All", 
+                "🚀 Generate Prompts & Test All", 
                 disabled=not (questions_data and batch_transcript and len(questions_data) == num_questions)
             )
         
@@ -626,53 +626,110 @@ def main():
             elif not batch_transcript.strip():
                 st.error("Please enter a transcript")
             else:
-                with st.spinner("Generating prompts and submitting jobs..."):
-                    # Generate prompts for each question
-                    generated_prompts = []
-                    job_ids = []
+                with st.spinner("Step 1/2: Generating prompts via RunPod..."):
+                    # First, generate prompts for each question via RunPod
+                    prompt_generation_jobs = []
                     
                     for q_data in questions_data:
-                        # Generate prompt
-                        prompt = f"""Answer questions based on the interaction between a call-center agent and a customer.
-
-QUESTION:
-{q_data['question']}
-
-RATING OPTIONS:
-{q_data['rating_options']}
-
-GUIDELINE:
-{q_data['guideline']}
-
-Please analyze the interaction and provide your answer in the following JSON format:
-{{
-    "Question": "{q_data['question']}",
-    "Answer": "[Select appropriate option from: {q_data['rating_options']}]",
-    "Justification": "[Provide detailed justification based on the interaction and guidelines, including relevant evidence from the interaction]"
-}}
-
-IMPORTANT: Return ONLY valid JSON, nothing else."""
-
-                        generated_prompts.append(prompt)
-                        
-                        # Submit job
-                        job_id = submit_job(batch_transcript, prompt, max_tokens, temperature)
-                        if job_id:
-                            job_ids.append({
+                        prompt_gen_job_id = submit_prompt_generation_job(
+                            q_data['question'], 
+                            q_data['rating_options'], 
+                            q_data['guideline'], 
+                            max_tokens=2048, 
+                            temperature=temperature
+                        )
+                        if prompt_gen_job_id:
+                            prompt_generation_jobs.append({
                                 'question_num': q_data['index'],
                                 'question': q_data['question'],
-                                'job_id': job_id
+                                'prompt_gen_job_id': prompt_gen_job_id,
+                                'rating_options': q_data['rating_options'],
+                                'guideline': q_data['guideline']
                             })
                     
-                    if job_ids:
-                        st.success(f"✅ Submitted {len(job_ids)} evaluation jobs!")
+                    st.success(f"✅ Submitted {len(prompt_generation_jobs)} prompt generation jobs!")
+                    
+                    # Store prompt generation job IDs
+                    st.session_state.batch_prompt_gen_jobs = prompt_generation_jobs
+                    st.session_state.batch_transcript = batch_transcript
+                    st.session_state.batch_waiting_for_prompts = True
+        
+        # Show prompt generation status
+        if 'batch_prompt_gen_jobs' in st.session_state and st.session_state.batch_prompt_gen_jobs:
+            st.subheader("📝 Prompt Generation Status")
+            
+            all_prompts_generated = True
+            generated_prompts = []
+            
+            for i, job_info in enumerate(st.session_state.batch_prompt_gen_jobs):
+                with st.expander(f"Question {job_info['question_num']}: {job_info['question'][:50]}...", expanded=True):
+                    st.write(f"**Prompt Generation Job ID:** `{job_info['prompt_gen_job_id']}`")
+                    
+                    # Check status
+                    if st.button(f"🔄 Check Prompt Status", key=f"check_prompt_gen_{i}"):
+                        with st.spinner("Checking status..."):
+                            status = check_job_status(job_info['prompt_gen_job_id'])
                         
-                        # Store in session state
-                        if 'batch_jobs' not in st.session_state:
-                            st.session_state.batch_jobs = []
+                        if status.get('status') == 'COMPLETED':
+                            st.success("✅ Prompt generated!")
+                            try:
+                                response_text = status.get('output')[0].get('choices')[0].get('tokens')[0]
+                                generated_prompt = extract_generated_prompt_from_response(response_text)
+                                
+                                job_info['generated_prompt'] = generated_prompt
+                                job_info['prompt_completed'] = True
+                                
+                            except Exception as e:
+                                st.error(f"Error extracting prompt: {e}")
+                                
+                        elif status.get('status') == 'IN_PROGRESS':
+                            st.info("⏳ Still generating...")
+                        elif status.get('status') == 'FAILED':
+                            st.error(f"❌ Failed: {status.get('error', 'Unknown error')}")
+            
+            # Check if all prompts are generated
+            all_complete = all(job.get('prompt_completed', False) for job in st.session_state.batch_prompt_gen_jobs)
+            
+            if all_complete:
+                st.success("✅ All prompts generated! Ready to test.")
+                
+                # Now test all prompts on transcript
+                if st.button("🧪 Test All Prompts on Transcript"):
+                    with st.spinner("Step 2/2: Testing prompts on transcript..."):
+                        job_ids = []
                         
-                        for job_info in job_ids:
-                            st.session_state.batch_jobs.append(job_info)
+                        for job_info in st.session_state.batch_prompt_gen_jobs:
+                            if 'generated_prompt' in job_info:
+                                # Submit test job
+                                test_job_id = submit_job(
+                                    st.session_state.batch_transcript, 
+                                    job_info['generated_prompt'], 
+                                    max_tokens, 
+                                    temperature
+                                )
+                                
+                                if test_job_id:
+                                    job_ids.append({
+                                        'question_num': job_info['question_num'],
+                                        'question': job_info['question'],
+                                        'job_id': test_job_id
+                                    })
+                        
+                        if job_ids:
+                            st.success(f"✅ Submitted {len(job_ids)} evaluation jobs!")
+                            
+                            # Store evaluation job IDs
+                            if 'batch_jobs' not in st.session_state:
+                                st.session_state.batch_jobs = []
+                            
+                            for job_info in job_ids:
+                                st.session_state.batch_jobs.append(job_info)
+                            
+                            # Clear prompt generation tracking
+                            if 'batch_prompt_gen_jobs' in st.session_state:
+                                del st.session_state.batch_prompt_gen_jobs
+                            if 'batch_waiting_for_prompts' in st.session_state:
+                                del st.session_state.batch_waiting_for_prompts
         
         # Display batch results section
         st.header("📊 Batch Results")
