@@ -1052,11 +1052,12 @@ def main():
             
             # Display results
             if st.session_state.bulk_results:
-                # Convert to DataFrame for download
+                # Convert to DataFrame for download (pivoted format)
                 results_list = []
                 for job_id, result_data in st.session_state.bulk_results.items():
                     result = result_data['result']
                     if result:
+                        # Store both rating and explanation
                         results_list.append({
                             'interactionid': result_data['interactionid'],
                             'question': result_data.get('question', result.get('question', result.get('Question', ''))),
@@ -1065,34 +1066,74 @@ def main():
                         })
                 
                 if results_list:
+                    # Create original DataFrame
                     results_df = pd.DataFrame(results_list)
                     
-                    st.write("**Results:**")
+                    st.write("**Results (Original Format):**")
                     st.dataframe(results_df, use_container_width=True)
                     
-                    # Download as CSV
-                    csv = results_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="📥 Download Results as CSV",
-                        data=csv,
-                        file_name=f"bulk_results_{time.strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-                    
-                    # Download as Excel
-                    buffer = BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        results_df.to_excel(writer, sheet_name='Results', index=False)
-                        # Also add full transcript data
-                        if 'bulk_transcripts_df' in st.session_state:
-                            st.session_state.bulk_transcripts_df.to_excel(writer, sheet_name='Transcripts', index=False)
-                    
-                    st.download_button(
-                        label="📥 Download Results as Excel",
-                        data=buffer.getvalue(),
-                        file_name=f"bulk_results_{time.strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                    # Pivot the data: Questions as rows, InteractionIDs as columns
+                    try:
+                        # Create pivoted table with ratings
+                        rating_df = results_df.pivot_table(
+                            index='question',
+                            columns='interactionid',
+                            values='rating',
+                            aggfunc='first'
+                        )
+                        rating_df = rating_df.fillna('').reset_index()
+                        
+                        st.write("**Pivoted Results (Ratings by Question):**")
+                        st.dataframe(rating_df, use_container_width=True)
+                        
+                        # Download as CSV
+                        csv = rating_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="📥 Download Ratings as CSV",
+                            data=csv,
+                            file_name=f"bulk_results_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                        
+                        # Download as Excel with multiple sheets
+                        buffer = BytesIO()
+                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                            # Pivoted ratings
+                            rating_df.to_excel(writer, sheet_name='Ratings (Pivoted)', index=False)
+                            
+                            # Create pivoted explanations
+                            explanation_df = results_df.pivot_table(
+                                index='question',
+                                columns='interactionid',
+                                values='explanation',
+                                aggfunc='first'
+                            )
+                            explanation_df = explanation_df.fillna('').reset_index()
+                            explanation_df.to_excel(writer, sheet_name='Explanations (Pivoted)', index=False)
+                            
+                            # Original format
+                            results_df.to_excel(writer, sheet_name='Original Format', index=False)
+                            
+                            # Transcripts
+                            if 'bulk_transcripts_df' in st.session_state:
+                                st.session_state.bulk_transcripts_df.to_excel(writer, sheet_name='Transcripts', index=False)
+                        
+                        st.download_button(
+                            label="📥 Download Results as Excel",
+                            data=buffer.getvalue(),
+                            file_name=f"bulk_results_{time.strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.warning(f"Could not pivot results: {e}")
+                        # Fall back to original format if pivot fails
+                        csv = results_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="📥 Download Results as CSV",
+                            data=csv,
+                            file_name=f"bulk_results_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
             
             # Display job list
             with st.expander("📋 Job Details"):
