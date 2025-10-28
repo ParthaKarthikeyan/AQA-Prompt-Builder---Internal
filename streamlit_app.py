@@ -133,9 +133,18 @@ def extract_generated_prompt_from_response(response_text: str) -> str:
 # Submit job to RunPod
 def submit_job(transcript: str, user_prompt: str, max_tokens: int = 32768, temperature: float = 0.4) -> str:
     """Submit a job to RunPod for inference"""
-    system_prompt = f"""You are an evaluation system for call center interactions. Analyze the transcript below and answer the question using ONLY ONE rating option from the available options provided in the prompt.
+    system_prompt = f"""Evaluate this transcript between an agent and a customer. Provide output in the following format:
 
-IMPORTANT: Select ONLY ONE rating option based on your analysis. Return ONLY valid JSON output, nothing else.
+**Output Format:**  
+```json  
+{{  
+  "question": "The question being evaluated",  
+  "rating": "Select ONE option: Yes/No/NA (or other options as specified in the prompt)",  
+  "explanation": "Provide a detailed explanation of the evaluation based on the guidelines, including relevant evidence from the transcript."  
+}}  
+```
+
+IMPORTANT: Return ONLY valid JSON output in the exact format above. Nothing else.
 
 Transcript:
 {transcript}
@@ -1050,9 +1059,9 @@ def main():
                     if result:
                         results_list.append({
                             'interactionid': result_data['interactionid'],
-                            'question': result_data.get('question', result.get('Question', '')),
-                            'answer': result.get('Answer', ''),
-                            'justification': result.get('Justification', '')
+                            'question': result_data.get('question', result.get('question', result.get('Question', ''))),
+                            'rating': result.get('rating', result.get('Rating', result.get('Answer', ''))),
+                            'explanation': result.get('explanation', result.get('Explanation', result.get('Justification', '')))
                         })
                 
                 if results_list:
