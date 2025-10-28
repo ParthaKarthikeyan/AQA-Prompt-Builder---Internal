@@ -261,7 +261,7 @@ def main():
             st.error(f"❌ Error checking endpoint: {e}")
 
     # Create tabs for different sections
-    tab1, tab2, tab3, tab4 = st.tabs(["📝 Build Prompt", "🚀 Test Prompt", "📊 Results", "📋 Batch Evaluation"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 Build Prompt", "🚀 Test Prompt", "📊 Results", "📋 Batch Evaluation", "📦 Bulk Testing"])
     
     # Tab 1: Build Prompt
     with tab1:
@@ -795,6 +795,207 @@ def main():
                 )
         else:
             st.info("👆 Fill in the questions and transcript above, then click 'Generate & Test All'")
+    
+    # Tab 5: Bulk Testing
+    with tab5:
+        st.header("📦 Bulk Testing - Multiple Transcripts")
+        st.markdown("Upload multiple transcripts and test them against your generated prompts")
+        
+        # Check if there are any generated prompts
+        if 'generated_prompt' not in st.session_state or not st.session_state.generated_prompt:
+            st.warning("⚠️ Please build a prompt in the 'Build Prompt' tab first")
+            
+            # Allow manual prompt entry
+            manual_prompt = st.text_area(
+                "Or enter a custom prompt to test:",
+                height=200,
+                key="bulk_manual_prompt",
+                placeholder="Enter your prompt here..."
+            )
+            if manual_prompt:
+                st.session_state.bulk_test_prompt = manual_prompt
+        else:
+            st.success("✅ Using prompt from 'Build Prompt' tab")
+            st.session_state.bulk_test_prompt = st.session_state.generated_prompt
+            st.text_area(
+                "Prompt to be used:",
+                value=st.session_state.bulk_test_prompt,
+                height=150,
+                disabled=True,
+                key="bulk_prompt_display"
+            )
+        
+        # File upload section
+        st.subheader("📄 Upload Transcripts File")
+        st.markdown("Upload a CSV or Excel file with columns: `interactionid`, `transcript`")
+        
+        uploaded_file = st.file_uploader(
+            "Choose a file",
+            type=['csv', 'xlsx'],
+            key="bulk_file_upload"
+        )
+        
+        if uploaded_file is not None:
+            try:
+                # Read the file
+                if uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                else:
+                    df = pd.read_excel(uploaded_file)
+                
+                st.success(f"✅ File loaded: {len(df)} transcripts")
+                
+                # Check required columns
+                if 'interactionid' not in df.columns or 'transcript' not in df.columns:
+                    st.error("❌ File must have 'interactionid' and 'transcript' columns")
+                    st.write(f"Found columns: {', '.join(df.columns)}")
+                else:
+                    st.write(f"**Preview ({len(df)} rows):**")
+                    st.dataframe(df.head(), use_container_width=True)
+                    
+                    # Store in session state
+                    st.session_state.bulk_transcripts_df = df
+                    
+                    # Submit button
+                    col1, col2 = st.columns([1, 4])
+                    with col1:
+                        if st.button("🚀 Start Bulk Testing", disabled='bulk_test_prompt' not in st.session_state):
+                            if 'bulk_test_prompt' not in st.session_state:
+                                st.error("Please enter or generate a prompt first")
+                            else:
+                                with st.spinner(f"Submitting {len(df)} jobs to RunPod..."):
+                                    bulk_job_ids = []
+                                    
+                                    for idx, row in df.iterrows():
+                                        interaction_id = row['interactionid']
+                                        transcript = row['transcript']
+                                        
+                                        job_id = submit_job(
+                                            transcript,
+                                            st.session_state.bulk_test_prompt,
+                                            max_tokens,
+                                            temperature
+                                        )
+                                        
+                                        if job_id:
+                                            bulk_job_ids.append({
+                                                'interactionid': interaction_id,
+                                                'transcript': transcript,
+                                                'job_id': job_id,
+                                                'index': idx
+                                            })
+                                    
+                                    if bulk_job_ids:
+                                        st.success(f"✅ Submitted {len(bulk_job_ids)} jobs!")
+                                        
+                                        # Store in session state
+                                        if 'bulk_jobs' not in st.session_state:
+                                            st.session_state.bulk_jobs = []
+                                        
+                                        st.session_state.bulk_jobs.extend(bulk_job_ids)
+            
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
+        
+        # Bulk results section
+        st.subheader("📊 Bulk Results")
+        
+        if 'bulk_jobs' in st.session_state and st.session_state.bulk_jobs:
+            st.write(f"**Total jobs submitted:** {len(st.session_state.bulk_jobs)}")
+            
+            # Store results
+            if 'bulk_results' not in st.session_state:
+                st.session_state.bulk_results = {}
+            
+            # Progress tracking
+            completed = len(st.session_state.bulk_results)
+            total = len(st.session_state.bulk_jobs)
+            
+            st.metric("Progress", f"{completed}/{total} completed", f"{int(completed/total*100) if total > 0 else 0}%")
+            
+            # Check status for all jobs
+            if st.button("🔄 Check All Statuses"):
+                with st.spinner("Checking job statuses..."):
+                    for job_info in st.session_state.bulk_jobs:
+                        if job_info['job_id'] not in st.session_state.bulk_results:
+                            status = check_job_status(job_info['job_id'])
+                            
+                            if status.get('status') == 'COMPLETED':
+                                try:
+                                    response_text = status.get('output')[0].get('choices')[0].get('tokens')[0]
+                                    jsons = extract_jsons_from_response(response_text)
+                                    
+                                    if jsons:
+                                        st.session_state.bulk_results[job_info['job_id']] = {
+                                            'interactionid': job_info['interactionid'],
+                                            'transcript': job_info['transcript'],
+                                            'result': jsons[0] if jsons else None,
+                                            'index': job_info['index']
+                                        }
+                                except Exception as e:
+                                    st.error(f"Error processing {job_info['interactionid']}: {e}")
+                    
+                    st.rerun()
+            
+            # Display results
+            if st.session_state.bulk_results:
+                # Convert to DataFrame for download
+                results_list = []
+                for job_id, result_data in st.session_state.bulk_results.items():
+                    result = result_data['result']
+                    if result:
+                        results_list.append({
+                            'interactionid': result_data['interactionid'],
+                            'question': result.get('Question', ''),
+                            'answer': result.get('Answer', ''),
+                            'justification': result.get('Justification', '')
+                        })
+                
+                if results_list:
+                    results_df = pd.DataFrame(results_list)
+                    
+                    st.write("**Results:**")
+                    st.dataframe(results_df, use_container_width=True)
+                    
+                    # Download as CSV
+                    csv = results_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download Results as CSV",
+                        data=csv,
+                        file_name=f"bulk_results_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                    
+                    # Download as Excel
+                    buffer = BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        results_df.to_excel(writer, sheet_name='Results', index=False)
+                        # Also add full transcript data
+                        if 'bulk_transcripts_df' in st.session_state:
+                            st.session_state.bulk_transcripts_df.to_excel(writer, sheet_name='Transcripts', index=False)
+                    
+                    st.download_button(
+                        label="📥 Download Results as Excel",
+                        data=buffer.getvalue(),
+                        file_name=f"bulk_results_{time.strftime('%Y%m%d_%H%M%S')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+            
+            # Display job list
+            with st.expander("📋 Job Details"):
+                for job_info in st.session_state.bulk_jobs:
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        status = "✅ Completed" if job_info['job_id'] in st.session_state.bulk_results else "⏳ Pending"
+                        st.write(f"**{job_info['interactionid']}** - Job ID: `{job_info['job_id']}` - {status}")
+                    with col2:
+                        if st.button("🗑️", key=f"bulk_remove_{job_info['job_id']}"):
+                            st.session_state.bulk_jobs.remove(job_info)
+                            if job_info['job_id'] in st.session_state.bulk_results:
+                                del st.session_state.bulk_results[job_info['job_id']]
+                            st.rerun()
+        else:
+            st.info("👆 Upload a CSV/Excel file and click 'Start Bulk Testing'")
 
 if __name__ == "__main__":
     main()
