@@ -838,7 +838,7 @@ def main():
                 )
         
         elif prompt_input_method == "Upload Prompts File (CSV/Excel)":
-            st.markdown("Upload a CSV or Excel file with columns: `question`, `prompt`")
+            st.markdown("Upload a CSV or Excel file with columns: `question_number`, `question`, `prompt`")
             
             prompts_file = st.file_uploader(
                 "Choose a prompts file",
@@ -860,17 +860,28 @@ def main():
                         st.error("❌ File must have 'question' and 'prompt' columns")
                         st.write(f"Found columns: {', '.join(prompts_df.columns)}")
                     else:
+                        # Add question_number if it doesn't exist
+                        if 'question_number' not in prompts_df.columns:
+                            prompts_df['question_number'] = range(1, len(prompts_df) + 1)
+                            st.info("ℹ️ Added 'question_number' column (1, 2, 3, ...)")
+                        
                         st.write(f"**Preview ({len(prompts_df)} rows):**")
                         st.dataframe(prompts_df.head(), use_container_width=True)
                         
-                        # Store in session state
+                        # Store in session state with question numbers
                         prompts_dict = {}
+                        prompts_with_numbers = {}
                         for _, row in prompts_df.iterrows():
                             prompts_dict[row['question']] = row['prompt']
+                            prompts_with_numbers[row['question']] = {
+                                'prompt': row['prompt'],
+                                'question_number': row['question_number']
+                            }
                         
                         st.session_state.bulk_test_prompts = {
                             'single': False,
                             'prompts': prompts_dict,
+                            'prompts_with_numbers': prompts_with_numbers,
                             'df': prompts_df
                         }
                 
@@ -970,6 +981,7 @@ def main():
                                 else:
                                     # Multiple prompts - test all prompts against all transcripts
                                     prompts_dict = prompts_info['prompts']
+                                    prompts_with_numbers = prompts_info.get('prompts_with_numbers', {})
                                     total_jobs = len(df) * len(prompts_dict)
                                     with st.spinner(f"Submitting {total_jobs} jobs to RunPod..."):
                                         bulk_job_ids = []
@@ -987,13 +999,19 @@ def main():
                                                 )
                                                 
                                                 if job_id:
+                                                    # Get question number if available
+                                                    question_number = ''
+                                                    if question in prompts_with_numbers:
+                                                        question_number = prompts_with_numbers[question]['question_number']
+                                                    
                                                     bulk_job_ids.append({
                                                         'interactionid': interaction_id,
                                                         'transcript': transcript,
                                                         'job_id': job_id,
                                                         'index': idx,
                                                         'prompt': prompt_text[:50],
-                                                        'question': question
+                                                        'question': question,
+                                                        'question_number': question_number
                                                     })
                                         
                                         if bulk_job_ids:
@@ -1043,6 +1061,7 @@ def main():
                                             'result': jsons[0] if jsons else None,
                                             'index': job_info['index'],
                                             'question': job_info.get('question', ''),
+                                            'question_number': job_info.get('question_number', ''),
                                             'prompt': job_info.get('prompt', '')
                                         }
                                 except Exception as e:
@@ -1057,8 +1076,9 @@ def main():
                 for job_id, result_data in st.session_state.bulk_results.items():
                     result = result_data['result']
                     if result:
-                        # Store both rating and explanation
+                        # Store both rating and explanation with question number
                         results_list.append({
+                            'question_number': result_data.get('question_number', ''),
                             'interactionid': result_data['interactionid'],
                             'question': result_data.get('question', result.get('question', result.get('Question', ''))),
                             'rating': result.get('rating', result.get('Rating', result.get('Answer', ''))),
@@ -1074,9 +1094,18 @@ def main():
                     
                     # Pivot the data: Questions as rows, InteractionIDs as columns
                     try:
+                        # Add combined question label if question_number exists
+                        if 'question_number' in results_df.columns:
+                            results_df['question_label'] = results_df.apply(
+                                lambda row: f"Q{row['question_number']}: {row['question']}" if row['question_number'] else row['question'], 
+                                axis=1
+                            )
+                        else:
+                            results_df['question_label'] = results_df['question']
+                        
                         # Create pivoted table with ratings
                         rating_df = results_df.pivot_table(
-                            index='question',
+                            index='question_label',
                             columns='interactionid',
                             values='rating',
                             aggfunc='first'
@@ -1103,7 +1132,7 @@ def main():
                             
                             # Create pivoted explanations
                             explanation_df = results_df.pivot_table(
-                                index='question',
+                                index='question_label',
                                 columns='interactionid',
                                 values='explanation',
                                 aggfunc='first'
