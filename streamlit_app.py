@@ -581,7 +581,7 @@ def main():
                 
                 rating_options = st.text_area(
                     f"Rating Options:",
-                    height=60,
+                    height=68,
                     key=f"batch_r_{i}",
                     placeholder="e.g., Yes / No / N/A"
                 )
