@@ -263,15 +263,14 @@ def main():
             if response_health.status_code == 200:
                 health_data = response_health.json()
                 st.success("✅ RunPod Endpoint Online")
-                st.metric("Jobs Completed", health_data.get("jobs", {}).get("completed", "N/A"))
                 
-                # Show worker information if available
-                if "workers" in health_data:
-                    workers_data = health_data["workers"]
-                    if isinstance(workers_data, dict):
-                        total_workers = len(workers_data)
-                        busy_workers = sum(1 for w in workers_data.values() if w.get("status") == "BUSY")
-                        st.metric("Workers", f"{busy_workers}/{total_workers} busy", delta=f"{total_workers} total")
+                # Safely get jobs completed if available
+                try:
+                    if isinstance(health_data, dict) and "jobs" in health_data:
+                        completed = health_data.get("jobs", {}).get("completed", "N/A")
+                        st.metric("Jobs Completed", completed)
+                except:
+                    pass  # Ignore if structure is unexpected
         except Exception as e:
             st.error(f"❌ Error checking endpoint: {e}")
 
