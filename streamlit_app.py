@@ -261,7 +261,7 @@ def main():
             st.error(f"❌ Error checking endpoint: {e}")
 
     # Create tabs for different sections
-    tab1, tab2, tab3 = st.tabs(["📝 Build Prompt", "🚀 Test Prompt", "📊 Results"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📝 Build Prompt", "🚀 Test Prompt", "📊 Results", "📋 Batch Evaluation"])
     
     # Tab 1: Build Prompt
     with tab1:
@@ -550,6 +550,194 @@ def main():
         
         if 'current_test_job' not in st.session_state and 'test_job_ids' not in st.session_state:
             st.info("👆 No tests yet. Build a prompt and test it in the 'Test Prompt' tab")
+    
+    # Tab 4: Batch Evaluation
+    with tab4:
+        st.header("📋 Batch Evaluation - Multiple Questions")
+        st.markdown("Evaluate multiple questions on the same transcript")
+        
+        # Input for number of questions
+        num_questions = st.number_input(
+            "Number of Questions", 
+            min_value=1, 
+            max_value=10, 
+            value=3,
+            help="How many questions do you want to evaluate?"
+        )
+        
+        # Container for questions
+        questions_data = []
+        
+        with st.expander(f"📝 Define {num_questions} Questions", expanded=True):
+            for i in range(num_questions):
+                st.subheader(f"Question {i+1}")
+                
+                question_text = st.text_area(
+                    f"Question {i+1}:",
+                    height=100,
+                    key=f"batch_q_{i}",
+                    placeholder=f"e.g., Did the agent greet the customer properly?"
+                )
+                
+                rating_options = st.text_area(
+                    f"Rating Options:",
+                    height=60,
+                    key=f"batch_r_{i}",
+                    placeholder="e.g., Yes / No / N/A"
+                )
+                
+                guideline = st.text_area(
+                    f"Guideline:",
+                    height=100,
+                    key=f"batch_g_{i}",
+                    placeholder="e.g., A proper greeting includes professional language and warm tone."
+                )
+                
+                if question_text and rating_options and guideline:
+                    questions_data.append({
+                        'index': i + 1,
+                        'question': question_text,
+                        'rating_options': rating_options,
+                        'guideline': guideline
+                    })
+                
+                st.divider()
+        
+        # Transcript input
+        st.subheader("📄 Transcript")
+        batch_transcript = st.text_area(
+            "Enter or paste transcript:",
+            height=300,
+            key="batch_transcript",
+            placeholder="Agent: Hello, thank you for calling [Company]. My name is Sarah. How can I assist you today?\nCustomer: Hi, I need help with my recent order..."
+        )
+        
+        # Submit button
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            batch_submit = st.button(
+                "🚀 Generate & Test All", 
+                disabled=not (questions_data and batch_transcript and len(questions_data) == num_questions)
+            )
+        
+        if batch_submit:
+            if not questions_data or len(questions_data) != num_questions:
+                st.error(f"Please fill in all {num_questions} questions with their rating options and guidelines")
+            elif not batch_transcript.strip():
+                st.error("Please enter a transcript")
+            else:
+                with st.spinner("Generating prompts and submitting jobs..."):
+                    # Generate prompts for each question
+                    generated_prompts = []
+                    job_ids = []
+                    
+                    for q_data in questions_data:
+                        # Generate prompt
+                        prompt = f"""Answer questions based on the interaction between a call-center agent and a customer.
+
+QUESTION:
+{q_data['question']}
+
+RATING OPTIONS:
+{q_data['rating_options']}
+
+GUIDELINE:
+{q_data['guideline']}
+
+Please analyze the interaction and provide your answer in the following JSON format:
+{{
+    "Question": "{q_data['question']}",
+    "Answer": "[Select appropriate option from: {q_data['rating_options']}]",
+    "Justification": "[Provide detailed justification based on the interaction and guidelines, including relevant evidence from the interaction]"
+}}
+
+IMPORTANT: Return ONLY valid JSON, nothing else."""
+
+                        generated_prompts.append(prompt)
+                        
+                        # Submit job
+                        job_id = submit_job(batch_transcript, prompt, max_tokens, temperature)
+                        if job_id:
+                            job_ids.append({
+                                'question_num': q_data['index'],
+                                'question': q_data['question'],
+                                'job_id': job_id
+                            })
+                    
+                    if job_ids:
+                        st.success(f"✅ Submitted {len(job_ids)} evaluation jobs!")
+                        
+                        # Store in session state
+                        if 'batch_jobs' not in st.session_state:
+                            st.session_state.batch_jobs = []
+                        
+                        for job_info in job_ids:
+                            st.session_state.batch_jobs.append(job_info)
+        
+        # Display batch results section
+        st.header("📊 Batch Results")
+        
+        if 'batch_jobs' in st.session_state and st.session_state.batch_jobs:
+            for i, job_info in enumerate(st.session_state.batch_jobs):
+                with st.expander(f"📋 Question {job_info['question_num']}: {job_info['question'][:50]}...", expanded=(i == 0)):
+                    st.write(f"**Job ID:** `{job_info['job_id']}`")
+                    
+                    col1, col2 = st.columns([1, 5])
+                    with col1:
+                        if st.button(f"🔄 Check Status", key=f"batch_check_{i}"):
+                            with st.spinner("Checking status..."):
+                                status = check_job_status(job_info['job_id'])
+                            
+                            if status.get('status') == 'COMPLETED':
+                                st.success("✅ Completed!")
+                                
+                                try:
+                                    response_text = status.get('output')[0].get('choices')[0].get('tokens')[0]
+                                    jsons = extract_jsons_from_response(response_text)
+                                    
+                                    if jsons:
+                                        for result in jsons:
+                                            st.json(result)
+                                        
+                                        # Store result
+                                        if 'batch_results' not in st.session_state:
+                                            st.session_state.batch_results = {}
+                                        st.session_state.batch_results[job_info['job_id']] = jsons
+                                        
+                                    else:
+                                        st.error("No valid JSON found in response")
+                                        
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
+                                    st.text(response_text[:500] if 'response_text' in locals() else "No response")
+                            
+                            elif status.get('status') == 'IN_PROGRESS':
+                                st.info("⏳ Still processing...")
+                            elif status.get('status') == 'FAILED':
+                                st.error(f"❌ Failed: {status.get('error', 'Unknown error')}")
+                    
+                    # Show stored results if available
+                    if 'batch_results' in st.session_state and job_info['job_id'] in st.session_state.batch_results:
+                        st.write("**Result:**")
+                        for result in st.session_state.batch_results[job_info['job_id']]:
+                            st.json(result)
+                    
+                    with col2:
+                        if st.button(f"🗑️ Remove", key=f"batch_remove_{i}"):
+                            st.session_state.batch_jobs.pop(i)
+                            st.rerun()
+            
+            # Download all results
+            if 'batch_results' in st.session_state and st.session_state.batch_results:
+                all_results_json = json.dumps(st.session_state.batch_results, indent=2)
+                st.download_button(
+                    label="📥 Download All Batch Results",
+                    data=all_results_json,
+                    file_name=f"batch_results_{time.strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
+        else:
+            st.info("👆 Fill in the questions and transcript above, then click 'Generate & Test All'")
 
 if __name__ == "__main__":
     main()
