@@ -139,7 +139,7 @@ def submit_job(transcript: str, user_prompt: str, max_tokens: int = 32768, tempe
 ```json  
 {{  
   "question": "The question being evaluated",  
-  "rating": "Select ONE option: Yes/No/NA (or other options as specified in the prompt)",  
+  "rating": "Select ONE option from what is specified in the prompt",  
   "explanation": "Provide a detailed explanation of the evaluation based on the guidelines, including relevant evidence from the transcript."  
 }}  
 ```
