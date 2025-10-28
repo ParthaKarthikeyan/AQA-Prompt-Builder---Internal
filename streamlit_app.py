@@ -985,40 +985,49 @@ def main():
                                             st.session_state.bulk_jobs.extend(bulk_job_ids)
                                 
                                 else:
-                                    # Multiple prompts - test all prompts against all transcripts
+                                    # Multiple prompts - send ALL prompts in ONE request per transcript
                                     prompts_dict = prompts_info['prompts']
                                     prompts_with_numbers = prompts_info.get('prompts_with_numbers', {})
-                                    total_jobs = len(df) * len(prompts_dict)
-                                    with st.spinner(f"Submitting {total_jobs} jobs to RunPod..."):
+                                    
+                                    # Build combined prompt with all questions
+                                    questions_list = []
+                                    for q_idx, (question, prompt_text) in enumerate(prompts_dict.items(), 1):
+                                        question_num = prompts_with_numbers.get(question, {}).get('question_number', q_idx)
+                                        questions_list.append(f"Question {question_num}: {question}")
+                                    
+                                    combined_prompt = f"""Please evaluate the following {len(prompts_dict)} questions based on the transcript provided.
+
+QUESTIONS TO EVALUATE:
+{chr(10).join(questions_list)}
+
+For each question, please provide your answer in the JSON format below. Return an array of JSON objects, one for each question.
+""" + "\n\n".join([prompt_text for prompt_text in prompts_dict.values()])
+                                    
+                                    total_jobs = len(df)
+                                    with st.spinner(f"Submitting {total_jobs} jobs to RunPod (1 per transcript with all prompts)..."):
                                         bulk_job_ids = []
                                         
                                         for idx, row in df.iterrows():
                                             interaction_id = row['interactionid']
                                             transcript = row['transcript']
                                             
-                                            for question, prompt_text in prompts_dict.items():
-                                                job_id = submit_job(
-                                                    transcript,
-                                                    prompt_text,
-                                                    max_tokens,
-                                                    temperature
-                                                )
-                                                
-                                                if job_id:
-                                                    # Get question number if available
-                                                    question_number = ''
-                                                    if question in prompts_with_numbers:
-                                                        question_number = prompts_with_numbers[question]['question_number']
-                                                    
-                                                    bulk_job_ids.append({
-                                                        'interactionid': interaction_id,
-                                                        'transcript': transcript,
-                                                        'job_id': job_id,
-                                                        'index': idx,
-                                                        'prompt': prompt_text[:50],
-                                                        'question': question,
-                                                        'question_number': question_number
-                                                    })
+                                            # Single job per transcript with all prompts
+                                            job_id = submit_job(
+                                                transcript,
+                                                combined_prompt,
+                                                max_tokens,
+                                                temperature
+                                            )
+                                            
+                                            if job_id:
+                                                bulk_job_ids.append({
+                                                    'interactionid': interaction_id,
+                                                    'transcript': transcript,
+                                                    'job_id': job_id,
+                                                    'index': idx,
+                                                    'prompts': list(prompts_dict.keys()),  # Store all questions
+                                                    'prompts_with_numbers': prompts_with_numbers
+                                                })
                                         
                                         if bulk_job_ids:
                                             st.success(f"✅ Submitted {len(bulk_job_ids)} jobs!")
@@ -1052,7 +1061,16 @@ def main():
             if st.button("🔄 Check All Statuses"):
                 with st.spinner("Checking job statuses..."):
                     for job_info in st.session_state.bulk_jobs:
-                        if job_info['job_id'] not in st.session_state.bulk_results:
+                        # Check if this job is already processed
+                        if 'prompts' in job_info and len(job_info['prompts']) > 0:
+                            # Multi-prompt mode: check if any result exists for this job
+                            processed = any(key.startswith(f"{job_info['job_id']}_") for key in st.session_state.bulk_results.keys())
+                            should_process = not processed
+                        else:
+                            # Single prompt mode: check if job_id exists
+                            should_process = job_info['job_id'] not in st.session_state.bulk_results
+                        
+                        if should_process:
                             status = check_job_status(job_info['job_id'])
                             
                             if status.get('status') == 'COMPLETED':
@@ -1061,19 +1079,46 @@ def main():
                                     jsons = extract_jsons_from_response(response_text)
                                     
                                     if jsons:
-                                        st.session_state.bulk_results[job_info['job_id']] = {
-                                            'interactionid': job_info['interactionid'],
-                                            'transcript': job_info['transcript'],
-                                            'result': jsons[0] if jsons else None,
-                                            'index': job_info['index'],
-                                            'question': job_info.get('question', ''),
-                                            'question_number': job_info.get('question_number', ''),
-                                            'prompt': job_info.get('prompt', '')
-                                        }
+                                        # Check if this job has multiple prompts (bulk multi-prompt mode)
+                                        if 'prompts' in job_info and len(job_info['prompts']) > 0:
+                                            # Process multiple responses for multiple prompts
+                                            prompts_list = job_info['prompts']
+                                            prompts_with_numbers = job_info.get('prompts_with_numbers', {})
+                                            
+                                            # Store each result separately
+                                            for i, json_result in enumerate(jsons):
+                                                if i < len(prompts_list):
+                                                    question = prompts_list[i]
+                                                    question_number = prompts_with_numbers.get(question, {}).get('question_number', '')
+                                                    
+                                                    st.session_state.bulk_results[f"{job_info['job_id']}_{i}"] = {
+                                                        'interactionid': job_info['interactionid'],
+                                                        'transcript': job_info['transcript'],
+                                                        'result': json_result,
+                                                        'index': job_info['index'],
+                                                        'question': question,
+                                                        'question_number': question_number,
+                                                        'prompt': 'Multi-Prompt'
+                                                    }
+                                        else:
+                                            # Single prompt mode
+                                            st.session_state.bulk_results[job_info['job_id']] = {
+                                                'interactionid': job_info['interactionid'],
+                                                'transcript': job_info['transcript'],
+                                                'result': jsons[0] if jsons else None,
+                                                'index': job_info['index'],
+                                                'question': job_info.get('question', ''),
+                                                'question_number': job_info.get('question_number', ''),
+                                                'prompt': job_info.get('prompt', '')
+                                            }
                                 except Exception as e:
                                     st.error(f"Error processing {job_info['interactionid']}: {e}")
+                            elif status.get('status') == 'IN_PROGRESS':
+                                pass  # Don't show message for every IN_PROGRESS
+                            elif status.get('status') == 'FAILED':
+                                st.error(f"❌ {job_info['interactionid']} - Failed")
                     
-                    st.rerun()
+                st.rerun()  # Rerun after checking all jobs
             
             # Display results
             if st.session_state.bulk_results:
@@ -1175,13 +1220,31 @@ def main():
                 for job_info in st.session_state.bulk_jobs:
                     col1, col2 = st.columns([3, 1])
                     with col1:
-                        status = "✅ Completed" if job_info['job_id'] in st.session_state.bulk_results else "⏳ Pending"
-                        st.write(f"**{job_info['interactionid']}** - Job ID: `{job_info['job_id']}` - {status}")
+                        # Check status for multi-prompt or single-prompt jobs
+                        if 'prompts' in job_info and len(job_info['prompts']) > 0:
+                            # Multi-prompt mode: check if results exist
+                            exists = any(key.startswith(f"{job_info['job_id']}_") for key in st.session_state.bulk_results.keys())
+                            status = "✅ Completed" if exists else "⏳ Pending"
+                            prompt_count = f" ({len(job_info['prompts'])} prompts)" if 'prompts' in job_info else ""
+                        else:
+                            status = "✅ Completed" if job_info['job_id'] in st.session_state.bulk_results else "⏳ Pending"
+                            prompt_count = ""
+                        
+                        st.write(f"**{job_info['interactionid']}** - Job ID: `{job_info['job_id']}` - {status}{prompt_count}")
                     with col2:
                         if st.button("🗑️", key=f"bulk_remove_{job_info['job_id']}"):
                             st.session_state.bulk_jobs.remove(job_info)
-                            if job_info['job_id'] in st.session_state.bulk_results:
-                                del st.session_state.bulk_results[job_info['job_id']]
+                            
+                            # Remove all related results
+                            if 'prompts' in job_info and len(job_info['prompts']) > 0:
+                                # Remove multi-prompt results
+                                keys_to_remove = [key for key in st.session_state.bulk_results.keys() if key.startswith(f"{job_info['job_id']}_")]
+                                for key in keys_to_remove:
+                                    del st.session_state.bulk_results[key]
+                            else:
+                                # Single prompt result
+                                if job_info['job_id'] in st.session_state.bulk_results:
+                                    del st.session_state.bulk_results[job_info['job_id']]
                             st.rerun()
         else:
             st.info("👆 Upload a CSV/Excel file and click 'Start Bulk Testing'")
