@@ -133,9 +133,11 @@ def extract_generated_prompt_from_response(response_text: str) -> str:
 # Submit job to RunPod
 def submit_job(transcript: str, user_prompt: str, max_tokens: int = 32768, temperature: float = 0.4) -> str:
     """Submit a job to RunPod for inference"""
-    system_prompt = f"""Answer questions based on the interaction between a call-center agent and a customer.
+    system_prompt = f"""You are an evaluation system for call center interactions. Analyze the transcript below and answer the question using ONLY ONE rating option from the available options provided in the prompt.
 
-Interaction:
+IMPORTANT: Select ONLY ONE rating option based on your analysis. Return ONLY valid JSON output, nothing else.
+
+Transcript:
 {transcript}
 """
 
@@ -178,37 +180,61 @@ def check_job_status(job_id: str) -> Dict[str, Any]:
 def extract_jsons_from_response(raw_response: str) -> List[Dict]:
     """Extract JSON content from the response text"""
     try:
-        # Function to extract content inside <think>...</think> tags
+        # Function to extract content after reasoning tags
         def extract_think_content(response_text):
-            """Extracts content inside <think>...</think> and other remaining text."""
-            think_match = re.search(r'<think>(.*?)</think>', response_text, re.DOTALL)
-            think_content = think_match.group(1).strip() if think_match else "No structured thought content available."
-            remaining_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
-            return think_content, remaining_text
+            """Extracts content after </think> tags."""
+            # Handle </think> tag
+            if '</think>' in response_text:
+                remaining_text = response_text.split('</think>')[-1].strip()
+            else:
+                remaining_text = response_text.strip()
+            return remaining_text
 
         # Clean content and convert to dictionary
         def clean_and_dict(text):
             # Remove all non-JSON content before the JSON object starts and clean up
-            cleaned_text = re.sub(r'^[^\{]*\{', '{', text, count=1)
+            # Find the first { and keep everything from there
+            idx = text.find('{')
+            if idx == -1:
+                raise ValueError("No JSON object found")
+            cleaned_text = text[idx:]
             return ast.literal_eval(cleaned_text)
 
-        # Extract the think content and remaining response
-        think_content, final_ans = extract_think_content(raw_response)
+        # Extract the final answer after any reasoning tags
+        final_ans = extract_think_content(raw_response)
 
-        # Find all JSON-like blocks in the remaining text
-        json_pattern = r'\{.*?\}'  # Regex to match all JSON blocks
-        json_matches = re.findall(json_pattern, final_ans, flags=re.DOTALL)
+        # Try to find and parse JSON
+        # Look for the first valid JSON object
+        json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'  # Better JSON pattern
+        json_matches = re.findall(json_pattern, final_ans, re.DOTALL)
+
+        # If no matches, try simpler approach
+        if not json_matches:
+            # Just try to parse the whole thing as JSON
+            try:
+                dict_result = clean_and_dict(final_ans)
+                return [dict_result]
+            except:
+                st.error(f"Could not parse response as JSON: {final_ans[:200]}")
+                return []
 
         # Clean and convert each JSON string to a dictionary
         json_dicts = []
         for json_str in json_matches:
-            cleaned_str = re.sub(r'^[^\{]*\{', '{', json_str, count=1)
-            json_dict = clean_and_dict(cleaned_str)
-            json_dicts.append(json_dict)
+            try:
+                # Clean up the JSON string
+                cleaned_str = json_str.strip()
+                json_dict = ast.literal_eval(cleaned_str)
+                json_dicts.append(json_dict)
+            except Exception as e:
+                st.warning(f"Could not parse JSON block: {e}")
+                continue
 
-        return json_dicts
+        return json_dicts if json_dicts else []
+        
     except Exception as e:
         st.error(f"Error parsing JSON response: {e}")
+        st.error(f"Raw response: {raw_response[:500]}")
         return []
 
 # Main Streamlit app
